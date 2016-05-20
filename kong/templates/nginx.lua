@@ -2,7 +2,7 @@ return [[
 worker_processes ${{NGINX_WORKER_PROCESSES}};
 daemon ${{NGINX_DAEMON}};
 
-error_log logs/error.log error;
+error_log logs/error.log debug;
 
 events {
 > if nginx_optimizations then

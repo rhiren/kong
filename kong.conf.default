@@ -43,3 +43,5 @@
 #nginx_daemon = on
 #nginx_optimizations = on
 #nginx_worker_processes = auto
+
+#log_level = debug

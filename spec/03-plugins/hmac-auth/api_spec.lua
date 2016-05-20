@@ -1,122 +1,170 @@
-local json = require "cjson"
-local http_client = require "kong.tools.http_client"
-local spec_helper = require "spec.spec_helpers"
+local helpers = require "spec.helpers"
+local cjson = require "cjson"
 
 describe("HMAC Auth Credentials API", function()
-  local BASE_URL, credential, consumer
+  local client, credential, consumer
+  setup("HMAC API", function()
+    helpers.dao:truncate_tables()
+    assert(helpers.prepare_prefix())
+    assert(helpers.start_kong())
 
-  setup(function()
-    spec_helper.prepare_db()
-    spec_helper.start_kong()
+    client = assert(helpers.http_client("127.0.0.1", helpers.admin_port))
   end)
 
   teardown(function()
-    spec_helper.stop_kong()
+    if client then
+      client:close()
+    end
+    helpers.stop_kong()
   end)
 
   describe("/consumers/:consumer/hmac-auth/", function()
-
-    setup(function()
-      local fixtures = spec_helper.insert_fixtures {
-        consumer = {{ username = "bob" }}
-      }
-      consumer = fixtures.consumer[1]
-      BASE_URL = spec_helper.API_URL.."/consumers/bob/hmac-auth/"
-    end)
-
     describe("POST", function()
-
-      it("[SUCCESS] should create a hmac-auth credential", function()
-        local response, status = http_client.post(BASE_URL, { username = "bob", secret = "1234" })
-        assert.equal(201, status)
-        credential = json.decode(response)
+      before_each(function()
+        helpers.dao:truncate_tables()
+        consumer = assert(helpers.dao.consumers:insert {
+        username = "bob",
+        custom_id = "1234"
+      })
+      end)
+      it("[SUCCESS] should create a hmac-auth credential", function()      
+        local res = assert(client:send {
+          method = "POST",
+          path = "/consumers/bob/hmac-auth/",
+          body = {
+            username = "bob",
+            secret = "1234"
+          },
+          headers = {["Content-Type"] = "application/json"}
+        })
+    
+        local body = assert.res_status(201, res)
+        credential = cjson.decode(body)
         assert.equal(consumer.id, credential.consumer_id)
       end)
 
       it("[FAILURE] should return proper errors", function()
-        local response, status = http_client.post(BASE_URL, {})
-        assert.equal(400, status)
-        assert.equal('{"username":"username is required"}\n', response)
+        local res = assert(client:send {
+          method = "POST",
+          path = "/consumers/bob/hmac-auth/",
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body = assert.res_status(400, res)
+        assert.equal('{"username":"username is required"}', body)
       end)
-
     end)
 
     describe("PUT", function()
-      setup(function()
-        if credential == nil then return end
-        spec_helper.get_env().dao_factory.hmacauth_credentials:delete({id = credential.id})
-      end)
-
       it("[SUCCESS] should create and update", function()
-        local response, status = http_client.put(BASE_URL, { username = "bob", secret = "1234" })
-        assert.equal(201, status)
-        credential = json.decode(response)
+        local res = assert(client:send {
+          method = "PUT",
+          path = "/consumers/bob/hmac-auth/",
+          body = {
+            username = "bob",
+            secret = "1234"
+          },
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body = assert.res_status(201, res)
+        credential = cjson.decode(body)
         assert.equal(consumer.id, credential.consumer_id)
       end)
 
       it("[FAILURE] should return proper errors", function()
-        local response, status = http_client.put(BASE_URL, {})
-        assert.equal(400, status)
-        assert.equal('{"username":"username is required"}\n', response)
+        local res = assert(client:send {
+          method = "PUT",
+          path = "/consumers/bob/hmac-auth/",
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body = assert.res_status(400, res)
+        assert.equal('{"username":"username is required"}', body)
       end)
-
     end)
 
     describe("GET", function()
-
       it("should retrieve all", function()
-        local response, status = http_client.get(BASE_URL)
-        assert.equal(200, status)
-        local body = json.decode(response)
+        local res = assert(client:send {
+          method = "GET",
+          path = "/consumers/bob/hmac-auth/",
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body_json = assert.res_status(200, res)
+        local body = cjson.decode(body_json)
         assert.equal(1, #(body.data))
       end)
-
     end)
   end)
 
   describe("/consumers/:consumer/hmac-auth/:id", function()
-
     describe("GET", function()
-
       it("should retrieve by id", function()
-        local response, status = http_client.get(BASE_URL..credential.id)
-        assert.equal(200, status)
-        local body = json.decode(response)
+        local res = assert(client:send {
+          method = "GET",
+          path = "/consumers/bob/hmac-auth/"..credential.id,
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body_json = assert.res_status(200, res)
+        local body = cjson.decode(body_json)
         assert.equals(credential.id, body.id)
       end)
-
     end)
 
     describe("PATCH", function()
-
       it("[SUCCESS] should update a credential", function()
-        local response, status = http_client.patch(BASE_URL..credential.id, { username = "alice" })
-        assert.equal(200, status)
-        credential = json.decode(response)
-        assert.equal("alice", credential.username)
+        local res = assert(client:send {
+          method = "PATCH",
+          path = "/consumers/bob/hmac-auth/"..credential.id,
+          body = {username = "alice"},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local body_json = assert.res_status(200, res)
+        credential = cjson.decode(body_json)
+        assert.equals("alice", credential.username)
       end)
 
       it("[FAILURE] should return proper errors", function()
-        local response, status = http_client.patch(BASE_URL..credential.id, { username = "" })
-        assert.equal(400, status)
-        assert.equal('{"username":"username is not a string"}\n', response)
+        local res = assert(client:send {
+          method = "PATCH",
+          path = "/consumers/bob/hmac-auth/"..credential.id,
+          body = {username = ""},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        local response = assert.res_status(400, res)
+        assert.equal('{"username":"username is required"}', response)
       end)
-
     end)
 
     describe("DELETE", function()
-
       it("[FAILURE] should return proper errors", function()
-        local _, status = http_client.delete(BASE_URL.."blah")
-        assert.equal(400, status)
+        local res = assert(client:send {
+          method = "DELETE",
+          path = "/consumers/bob/hmac-auth/alice",
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        assert.res_status(400, res)
 
-        _, status = http_client.delete(BASE_URL.."00000000-0000-0000-0000-000000000000")
-        assert.equal(404, status)
+        local res = assert(client:send {
+          method = "DELETE",
+          path = "/consumers/bob/hmac-auth/00000000-0000-0000-0000-000000000000",
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        assert.res_status(404, res)
       end)
 
       it("[SUCCESS] should delete a credential", function()
-        local _, status = http_client.delete(BASE_URL..credential.id)
-        assert.equal(204, status)
+        local res = assert(client:send {
+          method = "DELETE",
+          path = "/consumers/bob/hmac-auth/"..credential.id,
+          body = {},
+          headers = {["Content-Type"] = "application/json"}
+        })
+        assert.res_status(204, res)
       end)
     end)
   end)

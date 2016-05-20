@@ -1,43 +1,50 @@
-local json = require "cjson"
-local http_client = require "kong.tools.http_client"
-local spec_helper = require "spec.spec_helpers"
+local helpers = require "spec.helpers"
+local cjson = require "cjson"
+
 local cache = require "kong.tools.database_cache"
 local base64 = require "base64"
 local crypto = require "crypto"
 
-local STUB_GET_URL = spec_helper.STUB_GET_URL
-local API_URL = spec_helper.API_URL
-
 describe("HMAC Authentication Hooks", function()
-
+  local client_proxy, client_admin, consumer, credential
   setup(function()
-    spec_helper.prepare_db()
+    helpers.dao:truncate_tables()
+    assert(helpers.prepare_prefix())
+
+    local api1 = assert(helpers.dao.apis:insert {
+      request_host = "hmacauth.com",
+      upstream_url = "http://mockbin.com"
+    })
+    
+    assert(helpers.dao.plugins:insert {
+      name = "hmac-auth",
+      api_id = api1.id,
+      config = {
+        clock_skew = 3000
+      }
+    })
+    
+    consumer = assert(helpers.dao.consumers:insert {
+        username = "consumer1",
+        custom_id = "1234"
+    })
+    
+    credential = assert(helpers.dao["hmacauth_credentials"]:insert {
+        username = "bob",
+        secret = "secret",
+        consumer_id = consumer.id
+    })
+    
+    assert(helpers.start_kong())
+    client_proxy = assert(helpers.http_client("127.0.0.1", helpers.proxy_port))
+    client_admin = assert(helpers.http_client("127.0.0.1", helpers.admin_port))
   end)
 
   teardown(function()
-    spec_helper.stop_kong()
+    if client then client:close() end
+    helpers.stop_kong()
   end)
-
-  before_each(function()
-    spec_helper.restart_kong()
-
-    spec_helper.drop_db()
-    spec_helper.insert_fixtures {
-      api = {
-        {request_host = "hmacauth.com", upstream_url = "http://mockbin.com"}
-      },
-      consumer = {
-        {username = "consumer1"}
-      },
-      plugin = {
-        {name = "hmac-auth", config = {clock_skew = 3000}, __api = 1}
-      },
-      hmacauth_credential = {
-        {username = "bob", secret = "secret", __consumer = 1}
-      }
-    }
-  end)
-
+  
   local function hmac_sha1_binary(secret, data)
     return crypto.hmac.digest("sha1", data, secret, true)
   end
@@ -45,70 +52,124 @@ describe("HMAC Authentication Hooks", function()
   local function get_authorization(username)
     local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
     local encodedSignature   = base64.encode(hmac_sha1_binary("secret", "date: "..date))
-    return [["hmac username="]]..username..[[",algorithm="hmac-sha1",headers="date",signature="]]..encodedSignature..[["]], date
+    return [["hmac username="]]..username
+      ..[[",algorithm="hmac-sha1",headers="date",signature="]]
+      ..encodedSignature..[["]], date
   end
 
   describe("HMAC Auth Credentials entity invalidation", function()
-    it("should invalidate when Hmac Auth Credential entity is deleted", function()
+    it("should invalidate when Hmac Auth Credential entity is deleted #o", function()
       -- It should work
       local authorization, date = get_authorization("bob")
-      local _, status = http_client.get(STUB_GET_URL, {}, {host = "hmacauth.com",  date = date, authorization = authorization})
-      assert.equals(200, status)
+      local res = assert(client_proxy:send {
+        method = "GET",
+        path = "/requests",
+        body = {},
+        headers = {
+          ["HOST"] = "hmacauth.com", 
+          date = date,
+          authorization = authorization
+        }
+      }) 
+
+      assert.res_status(200, res)
 
       -- Check that cache is populated
       local cache_key = cache.hmacauth_credential_key("bob")
-      local _, status = http_client.get(API_URL.."/cache/"..cache_key)
-      assert.equals(200, status)
+      res = assert(client_admin:send {
+        method = "GET",
+        path = "/cache/"..cache_key,
+        body = {},
+      })
+      assert.res_status(200, res)
 
       -- Retrieve credential ID
-      local response, status = http_client.get(API_URL.."/consumers/consumer1/hmac-auth/")
-      assert.equals(200, status)
-      local credential_id = json.decode(response).data[1].id
-      assert.truthy(credential_id)
+      res = assert(client_admin:send {
+        method = "GET",
+        path = "/consumers/consumer1/hmac-auth/",
+        body = {},
+      })
+      local body = assert.res_status(200, res)
+      local credential_id = cjson.decode(body).data[1].id
+      assert.equal(credential.id, credential_id)
       
       -- Delete Hmac Auth credential (which triggers invalidation)
-      local _, status = http_client.delete(API_URL.."/consumers/consumer1/hmac-auth/"..credential_id)
-      assert.equals(204, status)
+      res = assert(client_admin:send {
+        method = "DELETE",
+        path = "/consumers/consumer1/hmac-auth/"..credential_id,
+        body = {},
+      })
+      assert.res_status(204, res)
 
       -- Wait for cache to be invalidated
       local exists = true
       while(exists) do
-        local _, status = http_client.get(API_URL.."/cache/"..cache_key)
-        if status ~= 200 then
+        local resp = client_admin:send {
+          method = "GET",
+          path = "/cache/"..cache_key,
+          body = {},
+        }
+        print("WOT")
+        print(resp.status)
+        if resp.status ~= 200 then
           exists = false
         end
       end
 
       -- It should not work
-      local authorization, date = get_authorization("bob")
-      local _, status = http_client.get(STUB_GET_URL, {}, {host = "hmacauth.com",  date = date, authorization = authorization})
-      assert.equals(403, status)
+      authorization, date = get_authorization("bob")
+      local res = assert(client_proxy:send {
+        method = "POST",
+        body = {},
+        headers = {
+          ["HOST"] = "hmacauth.com", 
+          date = date,
+          authorization = authorization
+        }
+      }) 
+      assert.res_status(403, res)
     end)
     it("should invalidate when Hmac Auth Credential entity is updated", function()
+      credential = assert(helpers.dao["hmacauth_credentials"]:insert {
+        username = "bob",
+        secret = "secret",
+        consumer_id = consumer.id
+      })
       -- It should work
       local authorization, date = get_authorization("bob")
-      local _, status = http_client.get(STUB_GET_URL, {}, {host = "hmacauth.com",  date = date, authorization = authorization})
-      assert.equals(200, status)
+      local res = assert(client_proxy:send {
+        method = "GET",
+        path = "/requests",
+        body = {},
+        headers = {
+          ["HOST"] = "hmacauth.com", 
+          date = date,
+          authorization = authorization
+        }
+      }) 
+      assert.res_status(200, res)
 
       -- It should not work
       local authorization, date = get_authorization("hello123")
-      local _, status = http_client.get(STUB_GET_URL, {}, {host = "hmacauth.com",  date = date, authorization = authorization})
-      assert.equals(403, status)
-
-      -- Check that cache is populated
-      local cache_key = cache.hmacauth_credential_key("bob")
-      local _, status = http_client.get(API_URL.."/cache/"..cache_key)
-      assert.equals(200, status)
-
-      -- Retrieve credential ID
-      local response, status = http_client.get(API_URL.."/consumers/consumer1/hmac-auth/")
-      assert.equals(200, status)
-      local credential_id = json.decode(response).data[1].id
-      assert.truthy(credential_id)
+      res = assert(client_proxy:send {
+        method = "GET",
+        path = "/requests",
+        body = {},
+        headers = {
+          ["HOST"] = "hmacauth.com", 
+          date = date,
+          authorization = authorization
+        }
+      }) 
+      assert.res_status(403, res)
       
-      -- Delete Hmac Auth credential (which triggers invalidation)
-      local _, status = http_client.patch(API_URL.."/consumers/consumer1/hmac-auth/"..credential_id, {username="hello123"})
-      assert.equals(200, status)
+      -- Update Hmac Auth credential (which triggers invalidation)
+      res = assert(client_admin:send {
+        method = "PATCH",
+        path = "/consumers/consumer1/hmac-auth/"..credential.id,
+        body = {username="hello123"},
+      })
+      assert.res_status(200, res)
 
       -- Wait for cache to be invalidated
       local exists = true
