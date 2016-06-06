@@ -4,6 +4,10 @@ local DEFAULT_PATHS = {
 }
 
 local CONF_SCHEMA = {
+  
+  working_dir = {typ = "string"},
+  
+
   -- kong
   log_level = {enum = {"debug", "info", "notice", "warn",
                        "error", "crit", "alert", "emerg"}},
